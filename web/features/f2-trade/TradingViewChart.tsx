@@ -1,0 +1,661 @@
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+import {
+  CandlestickSeries,
+  ColorType,
+  createChart,
+  LineSeries,
+  type IChartApi,
+  type ISeriesApi,
+  type SeriesType,
+  type Time,
+  type UTCTimestamp,
+} from "lightweight-charts";
+import {
+  parseChartPoints,
+  type ChartPoint,
+  type PrototypeChartPeriod,
+  type PrototypeChartType,
+} from "./chart-data";
+import {
+  buildTradeMarkers,
+  type ChartTrade,
+  type TradeMarker,
+} from "../../shared/engine/trade-markers";
+
+type LoadState = "loading" | "ready" | "error";
+
+/**
+ * 핀 색을 정하는 값. `GET /api/trades` 가 줄마다 싣는다 (F11 SPEC §5.1).
+ *
+ * `ChartTrade.member` 는 부모·자녀 둘뿐이라 엄마와 아빠가 같은 색이 된다. 마커가
+ * 답해야 하는 질문에 "누가 샀나"가 들어 있으므로 그 구분이 사라지면 안 된다.
+ *
+ * `shared/engine/trade-markers.ts` 의 `ChartTrade` 를 넓히지 않고 여기서 받는다 —
+ * `web/shared` 는 오케스트레이터 소유이고, 마커 **계산**에는 색이 필요 없다. 색은
+ * 그리는 쪽의 관심사다. 같은 리터럴이 `f0-home` 에도 있어 언젠가 `shared` 로 올려야
+ * 하며 그 정리는 SPEC §5.1 에 적어 두었다.
+ */
+type PinRole = "child" | "mom" | "dad";
+
+/** 응답 한 줄. 마커 계산이 읽는 부분(`ChartTrade`)에 색만 얹었다. */
+type ChartTradeRow = ChartTrade & { role: PinRole };
+
+const ROLE_COLOR: Record<PinRole, string> = {
+  child: "var(--color-trade-child)",
+  mom: "var(--color-trade-mom)",
+  dad: "var(--color-trade-dad)",
+};
+
+/** 차트가 떴다고 app.html 에 알린다. 답으로 현재 기간·차트종류가 온다. */
+const CHART_READY_MESSAGE = "kiwoom:chart-ready";
+const CHART_OPTIONS_MESSAGE = "kiwoom:chart-options";
+
+const PERIODS: readonly PrototypeChartPeriod[] = ["minute", "daily", "weekly"];
+const CHART_TYPES: readonly PrototypeChartType[] = ["line", "candlestick"];
+
+/** 화면에 찍을 자리가 잡힌 마커. */
+type PlacedMarker = TradeMarker & { x: number; y: number };
+
+/**
+ * 마커를 그리는 기간. 주봉은 뺀다.
+ *
+ * 봉 하나가 한 주라 그 주의 매매가 전부 같은 x 로 몰린다. 봉·방향당 하나만 남기므로
+ * 나머지는 화면에서 사라지고, 남은 하나도 그 주 어느 날 체결인지 짚지 못한다.
+ * 일봉·분봉은 봉이 곧 하루·1분이라 대표 하나가 그 구간을 그대로 가리킨다.
+ */
+const MARKER_PERIODS: readonly PrototypeChartPeriod[] = ["minute", "daily"];
+
+/** 뱃지 한 변. 원본 시안(서비스 개요 HTML)의 22×22 rx=6 을 따른다. */
+const BADGE = 22;
+
+/**
+ * 체결가와 뱃지 사이 간격. 꼬리 길이와 같아서 **꼬리 꼭짓점이 체결가에 정확히 닿는다**.
+ *
+ * 예전에는 50px 이었다. 뱃지가 봉을 덮지 않게 띄운 값인데, 그러면 뱃지가 체결가에서
+ * 5만원 넘게 떨어진 허공에 뜬다 — 시안(`chartTradeLegend` 가 붙은 차트 화면)처럼
+ * "이 가격에 샀다"를 차트에서 읽을 수가 없고, 사용자는 뱃지가 가리키는 눈금을 그대로
+ * 체결가로 오독한다. 실제로 235,000원에 산 크래프톤 뱃지가 258,000원 근처에 떴다.
+ *
+ * 뱃지가 봉을 가리는 문제는 간격이 아니라 **점선 안내선**(아래 `GUIDE`)이 푼다. 뱃지는
+ * 봉 바로 위·아래에 붙고, 어느 봉·어느 가격인지는 점선이 끝까지 이어 준다.
+ */
+const GAP = 10;
+
+/**
+ * 꼬리 높이. 뱃지 변에서 체결가 쪽으로 뻗고, `GAP` 과 같으므로 꼭짓점이 체결가에 닿는다.
+ *
+ * 둘을 같은 값으로 묶어 두면 "간격을 벌렸더니 꼬리가 허공을 가리킨다"가 구조적으로
+ * 생기지 않는다. 꼬리는 다시 정확한 y 를 짚는 바늘이다.
+ */
+const TAIL = 10;
+
+/**
+ * 체결 지점에서 시간축까지 내리는 점선. 원본 프로토타입의 `chartTrades` 안내선과 같다.
+ *
+ * 뱃지만으로는 어느 봉인지 눈으로 훑어 내려가야 하고, 뱃지 폭(22px)이 봉 간격보다 넓어
+ * 옆 봉을 가리키는 것처럼 보이기도 한다. 점선이 그 x 를 끝까지 이어 주면 뱃지를 봉에
+ * 바짝 붙여도 어느 날 체결인지 헷갈리지 않는다.
+ */
+const GUIDE_DASH = "2 3";
+const GUIDE_OPACITY = 0.4;
+
+/**
+ * 뱃지를 플롯 영역 안에 가둔다.
+ *
+ * 끝에 가까운 체결은 `GAP` 만큼 벌리면 뱃지가 위아래로 삐져나간다. 위로는 SVG 뷰포트
+ * 밖이라 통째로 사라지고 — 마커가 없는 것과 구분이 안 된다 — 아래로는 시간축을 덮어
+ * 날짜 위에 뱃지가 얹힌다. 뱃지를 끝에 붙여 세우고, 꼬리는 뱃지 변에서 따므로 같이 따라간다.
+ *
+ * `paneHeight` 는 컨테이너 높이(238)가 아니라 `chart.paneSize().height` 다. 두 축을 뺀
+ * 값이라 시간축 위에서 정확히 멈춘다.
+ *
+ * 뱃지뿐 아니라 **꼬리가 뻗는 쪽**도 여유를 남긴다. 체결가가 지금 보이는 봉들의
+ * 가격 범위를 크게 벗어나면(예: 예전 체결이 지금보다 훨씬 싸거나 비쌌던 경우)
+ * `priceToCoordinate` 가 페인 밖 좌표를 주고, 뱃지는 끝에 눌러앉는다. 꼬리 길이만큼
+ * 더 여유를 안 두면 뱃지는 끝에 딱 붙었는데 꼬리만 SVG 뷰포트 밖으로 삐져나가
+ * 통째로 잘려 안 보인다 — 매수는 아래로, 매도는 위로 `TAIL` 만큼 더 물러선다.
+ */
+function clampBadgeTop(top: number, paneHeight: number, side: TradeMarker["side"]) {
+  const min = side === "sell" ? TAIL : 0;
+  const max = side === "buy" ? paneHeight - BADGE - TAIL : paneHeight - BADGE;
+  return Math.min(Math.max(top, min), max);
+}
+
+/**
+ * 처음 보여줄 봉 개수.
+ *
+ * `fitContent()` 는 받아온 봉을 전부 330px 폭에 밀어 넣어서 일봉 1년치·주봉 3년치가
+ * 실오라기처럼 뭉개진다. 기간별로 최근 구간만 잘라 띄우면 봉 하나가 8px 안팎이 되어
+ * 캔들 몸통과 꼬리가 구분된다. 사용자는 그대로 왼쪽으로 스크롤해 과거를 볼 수 있다.
+ */
+const INITIAL_BARS: Record<PrototypeChartPeriod, number> = {
+  minute: 30,
+  daily: 36,
+  weekly: 30,
+};
+
+/** 최근 구간만 띄운다. 봉이 그보다 적으면 전체를 채운다. */
+function showRecentBars(chart: IChartApi, total: number, period: PrototypeChartPeriod) {
+  const span = INITIAL_BARS[period];
+  if (total <= span) {
+    chart.timeScale().fitContent();
+    return;
+  }
+  chart.timeScale().setVisibleLogicalRange({ from: total - span, to: total - 1 });
+}
+
+/**
+ * 마커를 찍을 화면 좌표를 잡는다.
+ *
+ * 라이브러리 기본 마커는 모양이 원·사각·화살표뿐이라 시안의 "꼬리 붙은 둥근 뱃지
+ * + 흰 B/S" 를 못 그린다. 대신 차트가 주는 좌표 변환만 빌려 SVG 를 차트 위에 얹는다.
+ * 시안 마크업을 그대로 쓸 수 있고, 나중에 탭·툴팁을 붙일 때도 DOM 이벤트로 끝난다.
+ *
+ * **받은 x 를 그대로 쓴다.** 예전에는 뱃지가 가격축 숫자를 덮지 않게 x 를 페인 안쪽으로
+ * 잘라 붙였는데, 그러면 차트를 드래그해 체결일이 오른쪽 끝을 지날 때 뱃지가 그 자리에
+ * 눌러앉아 거래일이 아닌 날짜를 가리켰다. 마커가 답해야 하는 질문이 "언제 샀고 언제
+ * 팔았나" 이므로 날짜가 어긋나는 쪽이 더 나쁘다. 가격축은 SVG 폭으로 막는다 (SPEC §6).
+ */
+function placeMarkers(
+  markers: readonly TradeMarker[],
+  chart: IChartApi,
+  series: ISeriesApi<SeriesType, Time>,
+): PlacedMarker[] {
+  const timeScale = chart.timeScale();
+  const placed: PlacedMarker[] = [];
+  for (const marker of markers) {
+    const x = timeScale.timeToCoordinate(marker.time as UTCTimestamp);
+    const y = series.priceToCoordinate(marker.price);
+    // 스크롤·줌으로 화면 밖에 나간 체결은 좌표가 없다. 그리지 않는다.
+    if (x === null || y === null) continue;
+    placed.push({ ...marker, x, y });
+  }
+  return placed;
+}
+
+/** 좌표가 그대로면 상태를 갈아끼우지 않는다 — 매 프레임 다시 그리지 않기 위해서다. */
+function samePlacement(left: readonly PlacedMarker[], right: readonly PlacedMarker[]) {
+  if (left.length !== right.length) return false;
+  return left.every((marker, index) => {
+    const other = right[index];
+    return (
+      marker.id === other.id &&
+      Math.round(marker.x) === Math.round(other.x) &&
+      Math.round(marker.y) === Math.round(other.y)
+    );
+  });
+}
+
+function token(name: string, fallback: string) {
+  const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return value || fallback;
+}
+
+function formatTime(time: Time, period: PrototypeChartPeriod) {
+  if (typeof time !== "number") return String(time);
+  return new Intl.DateTimeFormat("ko-KR", {
+    timeZone: "Asia/Seoul",
+    // 분봉은 하루 안에서만 움직이므로 날짜 없이 시:분만 보여준다.
+    ...(period === "minute"
+      ? { hour: "2-digit", minute: "2-digit" }
+      : { month: "numeric", day: "numeric" }),
+  }).format(new Date(time * 1000));
+}
+
+/** 크로스헤어 시간바는 눈금과 달리 분봉에서도 월.일을 같이 보여준다. */
+function formatCrosshairTime(time: Time, period: PrototypeChartPeriod) {
+  if (typeof time !== "number") return String(time);
+  return new Intl.DateTimeFormat("ko-KR", {
+    timeZone: "Asia/Seoul",
+    month: "numeric",
+    day: "numeric",
+    ...(period === "minute" ? { hour: "2-digit", minute: "2-digit" } : {}),
+  }).format(new Date(time * 1000));
+}
+
+export function TradingViewChart({ symbol, period, chartType }: {
+  symbol: string;
+  /** 첫 렌더용 기본값. 이후 값은 app.html 이 메시지로 바꾼다. */
+  period: PrototypeChartPeriod;
+  /** 첫 렌더용 기본값. 이후 값은 app.html 이 메시지로 바꾼다. */
+  chartType: PrototypeChartType;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  /** 차트·시리즈 인스턴스. 1초 재조회로 `points` 가 바뀔 때마다 다시 만들지 않고 데이터만 갈아끼운다. */
+  const chartRef = useRef<IChartApi | null>(null);
+  const seriesRef = useRef<ISeriesApi<SeriesType, Time> | null>(null);
+  /** 마커 좌표를 매 프레임 다시 잡는 루프(아래)가 읽는다. 데이터가 갱신될 때만 바뀐다. */
+  const markersRef = useRef<readonly TradeMarker[]>([]);
+  /** 이 차트 인스턴스에서 초기 가시 구간을 이미 잡았는지. 1초 재조회마다 다시 잡으면 스크롤·확대가 튄다. */
+  const hasFitRef = useRef(false);
+  const [shown, setShown] = useState({ period, chartType });
+  const [points, setPoints] = useState<ChartPoint[] | null>(null);
+  const [state, setState] = useState<LoadState>("loading");
+  const [placed, setPlaced] = useState<PlacedMarker[]>([]);
+  /** 이 종목의 가족 체결. `GET /api/trades` 가 유일한 출처다 (F11 SPEC §6.1). */
+  const [trades, setTrades] = useState<ChartTradeRow[]>([]);
+  /** 이 종목에서 찾은 체결 수. `placed` 와 갈리면 좌표를 못 잡았다는 뜻이다. */
+  const [found, setFound] = useState(0);
+  /**
+   * 가격축·시간축을 뺀 플롯 영역 크기. 마커 SVG 를 여기까지만 그려 축을 덮지 않게 한다.
+   *
+   * 높이를 상수 238 로 박아두면 안 된다. 컨테이너는 238 이지만 그 아래쪽을 시간축이
+   * 쓰므로 실제 플롯은 그보다 짧고, 238 을 기준으로 가두면 매도 뱃지가 x 축 위로 내려앉는다.
+   * `paneSize()` 는 두 축을 뺀 값을 준다.
+   */
+  const [pane, setPane] = useState({ width: 0, height: 0 });
+  const { period: shownPeriod, chartType: shownChartType } = shown;
+
+  /**
+   * 기간·차트종류를 부모(app.html)에게서 메시지로 받는다.
+   *
+   * 예전에는 두 값이 iframe `src` 의 쿼리에 있어서, 분봉·일봉·주봉이나 선·캔들을 누를 때마다
+   * 이 문서가 통째로 다시 열렸다. 차트 번들을 다시 파싱하고 데이터도 다시 받았는데,
+   * 선↔캔들은 그릴 데이터가 완전히 같아서 그 왕복이 전부 헛일이었다.
+   */
+  useEffect(() => {
+    let answered = false;
+
+    const receive = (event: MessageEvent<unknown>) => {
+      if (event.origin !== window.location.origin) return;
+      const message = event.data as {
+        type?: unknown;
+        period?: unknown;
+        chartType?: unknown;
+      } | null;
+      if (!message || typeof message !== "object" || message.type !== CHART_OPTIONS_MESSAGE) return;
+      answered = true;
+
+      setShown((current) => {
+        const next = {
+          period: PERIODS.includes(message.period as PrototypeChartPeriod)
+            ? (message.period as PrototypeChartPeriod)
+            : current.period,
+          chartType: CHART_TYPES.includes(message.chartType as PrototypeChartType)
+            ? (message.chartType as PrototypeChartType)
+            : current.chartType,
+        };
+        return next.period === current.period && next.chartType === current.chartType
+          ? current
+          : next;
+      });
+    };
+
+    window.addEventListener("message", receive);
+
+    // 종목이 바뀌어 이 문서가 다시 열렸을 때도 부모의 현재 선택을 되받는다.
+    // 부모가 아직 수신 준비 전일 수 있어서, 답이 올 때까지 짧게 몇 번 더 알린다.
+    const announce = () => window.parent.postMessage({ type: CHART_READY_MESSAGE }, window.location.origin);
+    announce();
+    const retry = window.setInterval(() => {
+      if (answered) window.clearInterval(retry);
+      else announce();
+    }, 400);
+    const giveUp = window.setTimeout(() => window.clearInterval(retry), 4000);
+
+    return () => {
+      window.clearInterval(retry);
+      window.clearTimeout(giveUp);
+      window.removeEventListener("message", receive);
+    };
+  }, []);
+
+  /**
+   * 데이터는 종목·기간에만 달려 있다. 선↔캔들 전환은 여기를 다시 타지 않는다.
+   *
+   * 실시간처럼 보이게 1초마다 전체를 다시 받는다. 토스 초당 15건 한도 안에서 종목 하나당
+   * 초당 1건이면 여유가 크다 — 마지막 봉만 병합하는 대신 그냥 전체를 다시 그린다.
+   * 겹치는 요청은 만들지 않는다: 이전 틱이 아직 안 끝났으면 다음 setInterval 호출을 건너뛴다.
+   */
+  useEffect(() => {
+    const controller = new AbortController();
+    setPoints(null);
+    setState("loading");
+    // 종목·기간이 바뀌면 이전 종목의 마커가 남아 있으면 안 된다.
+    setPlaced([]);
+    setFound(0);
+
+    let fetching = false;
+    const load = () => {
+      if (fetching) return;
+      fetching = true;
+      fetch(`/api/quote/${encodeURIComponent(symbol)}/chart?period=${shownPeriod}`, {
+        signal: controller.signal,
+        cache: "no-store",
+      })
+        .then((response) => response.ok ? response.json() : Promise.reject(new Error("chart request failed")))
+        .then((payload: unknown) => {
+          const received = parseChartPoints(payload);
+          if (!received.length) throw new Error("empty chart");
+          setPoints(received);
+        })
+        .catch(() => {
+          // 최초 로드 실패만 화면을 에러로 바꾼다. 이미 보여주고 있는 값이 있으면
+          // 그 틱의 실패는 무시하고 다음 1초 뒤에 다시 시도한다.
+          if (!controller.signal.aborted) {
+            setState((current) => (current === "loading" ? "error" : current));
+          }
+        })
+        .finally(() => {
+          fetching = false;
+        });
+    };
+
+    load();
+    const timer = window.setInterval(load, 1000);
+
+    return () => {
+      window.clearInterval(timer);
+      controller.abort();
+    };
+  }, [shownPeriod, symbol]);
+
+  /**
+   * 이 종목의 가족 체결. 기간·차트종류와 무관하므로 종목이 바뀔 때만 다시 받는다.
+   *
+   * 로그인 전(401)이나 조회 실패에는 빈 목록으로 둔다. 마커가 없는 차트는 정상이고,
+   * 여기서 옛 출처로 되돌아가면 저장소가 다시 갈린다 (SPEC §6.1).
+   */
+  useEffect(() => {
+    const controller = new AbortController();
+    setTrades([]);
+
+    fetch(`/api/trades?symbol=${encodeURIComponent(symbol)}`, { signal: controller.signal })
+      .then((response) => (response.ok ? response.json() : Promise.reject(new Error("trades request failed"))))
+      .then((payload: { trades?: ChartTradeRow[] }) => setTrades(payload.trades ?? []))
+      .catch(() => {});
+
+    return () => controller.abort();
+  }, [symbol]);
+
+  /**
+   * 차트·시리즈 생명주기. 종목·기간·차트종류가 바뀔 때만 다시 만든다.
+   *
+   * `points` 는 여기 의존성에 없다 — 1초마다 갱신되는 값을 여기 넣으면 매초 차트를
+   * 통째로 새로 만들어 스크롤·확대가 초기화되고 깜빡인다. 데이터 반영은 아래
+   * 데이터 갱신 effect 가 기존 시리즈에 `setData` 로만 반영한다.
+   */
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const up = token("--color-up", "#E8322E");
+    const down = token("--color-down", "#1668DC");
+    const ink = token("--color-ink", "#1A2233");
+    const gray = token("--color-gray", "#BEBEBE");
+    const bg = token("--color-bg", "#F6F7FA");
+    const white = token("--color-white", "#FFFFFF");
+    const chart = createChart(container, {
+      // 폭 0 으로 만들면 시간축이 계산되지 않아 timeToCoordinate 가 계속 null 을 준다.
+      width: Math.max(1, container.clientWidth),
+      height: 238,
+      layout: {
+        background: { type: ColorType.Solid, color: white },
+        textColor: ink,
+        fontFamily: "Pretendard, Segoe UI, Malgun Gothic, sans-serif",
+        attributionLogo: false,
+      },
+      grid: { vertLines: { color: bg }, horzLines: { color: bg } },
+      rightPriceScale: { borderColor: gray },
+      timeScale: {
+        borderColor: gray,
+        timeVisible: shownPeriod === "minute",
+        secondsVisible: false,
+        // lightweight-charts 기본 눈금 포맷터는 UTC 그대로 찍어 KST 와 9시간 어긋난다.
+        tickMarkFormatter: (time: Time) => formatTime(time, shownPeriod),
+      },
+      localization: {
+        locale: "ko-KR",
+        priceFormatter: (price: number) => `${Math.round(price).toLocaleString("ko-KR")}원`,
+        timeFormatter: (time: Time) => formatCrosshairTime(time, shownPeriod),
+      },
+      crosshair: { vertLine: { color: gray }, horzLine: { color: gray } },
+    });
+    const series: ISeriesApi<SeriesType, Time> =
+      shownChartType === "line"
+        ? chart.addSeries(LineSeries, {
+            color: up,
+            lineWidth: 3,
+            priceLineVisible: true,
+            lastValueVisible: true,
+          })
+        : chart.addSeries(CandlestickSeries, {
+            upColor: up,
+            downColor: down,
+            borderUpColor: up,
+            borderDownColor: down,
+            wickUpColor: up,
+            wickDownColor: down,
+            priceLineVisible: true,
+            lastValueVisible: true,
+          });
+
+    chartRef.current = chart;
+    seriesRef.current = series;
+    hasFitRef.current = false;
+
+    /**
+     * 좌표를 매 프레임 다시 읽는다.
+     *
+     * 이벤트만으로는 못 잡는다. `subscribeVisibleLogicalRangeChange` 는 **시간축**이
+     * 움직일 때만 오고, 가격축을 확대·축소하거나 자동 스케일이 자리를 다시 잡을 때는
+     * 아무 신호가 없다. 그러면 마커가 옛 y 에 그대로 남아 캔들과 어긋난다. 첫 배치도
+     * 마찬가지여서, 축이 아직 폭을 못 잡은 사이에 읽으면 `timeToCoordinate` 가 `null`
+     * 을 주고 마커가 통째로 사라진다.
+     *
+     * 좌표가 그대로면 상태를 갱신하지 않으므로 다시 그리지 않는다. 마커 목록 자체는
+     * `markersRef` 로 받는다 — 데이터 갱신 effect 가 갈아끼우는 값을 매 프레임 최신으로 읽는다.
+     */
+    let frame = 0;
+    const follow = () => {
+      const next = placeMarkers(markersRef.current, chart, series);
+      setPlaced((current) => (samePlacement(current, next) ? current : next));
+      setPane((current) => {
+        const { width, height } = chart.paneSize();
+        return current.width === width && current.height === height
+          ? current
+          : { width, height };
+      });
+      frame = requestAnimationFrame(follow);
+    };
+    frame = requestAnimationFrame(follow);
+
+    const observer = new ResizeObserver(([entry]) => {
+      chart.applyOptions({ width: Math.max(1, Math.floor(entry.contentRect.width)) });
+    });
+    observer.observe(container);
+
+    return () => {
+      cancelAnimationFrame(frame);
+      observer.disconnect();
+      chart.remove();
+      chartRef.current = null;
+      seriesRef.current = null;
+    };
+  }, [shownChartType, shownPeriod, symbol]);
+
+  /**
+   * 데이터 갱신. `points`(1초마다 새로 받음)가 바뀔 때마다 기존 시리즈에 값만 갈아끼운다.
+   *
+   * 차트를 다시 만들지 않으므로 사용자가 스크롤·확대해 둔 위치가 그대로 유지된다.
+   * 최초 데이터가 들어왔을 때만 `showRecentBars` 로 보여줄 구간을 잡고, 그 뒤 틱은
+   * 사용자가 보고 있는 구간을 건드리지 않는다.
+   */
+  useEffect(() => {
+    const chart = chartRef.current;
+    const series = seriesRef.current;
+    if (!points || !chart || !series) return;
+
+    if (shownChartType === "line") {
+      series.setData(points.map((point) => ({
+        time: point.time as UTCTimestamp,
+        value: point.close,
+      })));
+    } else {
+      series.setData(points.map((point) => ({
+        time: point.time as UTCTimestamp,
+        open: point.open,
+        high: point.high,
+        low: point.low,
+        close: point.close,
+      })));
+    }
+
+    // 마커는 표시만 한다. 클릭 이동은 붙이지 않는다 — F11 SPEC §6 참고.
+    const markers = MARKER_PERIODS.includes(shownPeriod)
+      ? buildTradeMarkers({ trades, candleTimes: points.map((point) => point.time) })
+      : [];
+    markersRef.current = markers;
+    setFound(markers.length);
+
+    if (!hasFitRef.current) {
+      showRecentBars(chart, points.length, shownPeriod);
+      hasFitRef.current = true;
+    }
+
+    setState("ready");
+  }, [points, shownChartType, shownPeriod, trades]);
+
+  return (
+    <main className="relative h-[264px] w-full overflow-hidden bg-white">
+      {/*
+        `data-trade-markers` 는 진단용이다. 마커가 안 보일 때 "이 종목에 체결이 없다"와
+        "체결은 찾았는데 좌표를 못 잡았다"를 화면을 안 고치고 구분한다.
+        예: found=2 placed=0 이면 좌표 계산이 실패한 것이다.
+      */}
+      <div
+        ref={containerRef}
+        className="h-[238px] w-full"
+        role="img"
+        data-trade-markers={`${found}/${placed.length}${
+          placed[0] ? ` @${Math.round(placed[0].x)},${Math.round(placed[0].y)}` : ""
+        }`}
+        aria-label={`${symbol} ${shownPeriod === "minute" ? "분봉" : shownPeriod === "daily" ? "일봉" : "주봉"} TradingView ${shownChartType === "line" ? "선" : "캔들"} 차트`}
+      />
+      {/*
+        z-[60] 이 있어야 보인다. lightweight-charts 는 자기 캔버스에 z-index 를 최대 50
+        까지 준다. 이 SVG 가 `auto` 로 남으면 좌표를 제대로 잡고도 캔버스 밑에 깔려
+        화면에 안 나온다.
+
+        폭·높이 모두 두 축을 뺀 플롯 크기다. SVG 는 제 뷰포트 밖을 그리지 않으므로,
+        체결일이 오른쪽 끝을 지나면 뱃지가 가격축 숫자를 덮는 대신 여기서 잘린다.
+        마커 x 를 페인 안으로 밀어 넣지 않는 이유이기도 하다 (SPEC §6).
+
+        높이도 같은 이유로 묶는다. `clampBadgeTop` 이 이미 시간축 위에서 멈추지만,
+        뷰포트까지 맞춰 두면 계산이 어긋나도 축 위로는 못 넘어간다.
+      */}
+      {state === "ready" && placed.length > 0 && pane.width > 0 && pane.height > 0 && (
+        <svg
+          className="pointer-events-none absolute left-0 top-0 z-[60]"
+          width={pane.width}
+          height={pane.height}
+        >
+          {(() => {
+            // 말풍선 꼬리처럼 뱃지 변에 붙는다. 밑변은 뱃지 모서리와 정확히 맞닿아
+            // 같은 fill 이라 이음매가 안 보이고, 꼭짓점은 체결가 쪽을 가리킨다.
+            // 밑변 너비(10)가 rx=6 으로 둥글린 모서리 사이 평평한 구간 안에 들어간다.
+            //
+            // 매수는 봉 위, 매도는 봉 아래로 나눈다. 방향만 봐도 산 자리와 판 자리가
+            // 구분되고, 같은 봉에서 매수·매도가 겹쳐도 뱃지가 서로 포개지지 않는다.
+            // SVG 는 y 가 아래로 자라므로 "위"가 뺄셈이다.
+            //
+            // 밑변·꼭짓점 모두 **잘린 뒤의 뱃지 위치**에서 딴다. 그래야 천장·바닥에 붙어
+            // 간격이 줄어든 마커도 꼬리가 뱃지에 붙은 채 같은 길이로 나온다.
+            //
+            // 다만 클램프가 `clampBadgeTop`의 꼬리 여유 구간까지 뱃지를 밀어낸 경우엔
+            // 방향을 뒤집는다. 그 여유 구간은 SVG 밖으로 잘리지 않으려고 비워둔
+            // 빈 공간이라, 원래 방향 그대로 꼬리를 그리면 차트가 없는 쪽(축 여백)을
+            // 가리킨다 — 체결가가 지금 보이는 봉 범위를 완전히 벗어난 경우다.
+            // 뒤집으면 항상 봉이 실제로 있는 안쪽을 가리킨다.
+            // 마커는 봉·방향당 대표 체결 하나만 남기지만 그 `id` 는 실제 체결의 것이라
+            // 여기서 되찾을 수 있다. 못 찾으면 `member` 로 접는다 — 색이 없어 핀이
+            // 통째로 사라지는 것보다 낫다.
+            const roleById = new Map(trades.map((trade) => [trade.id, trade.role]));
+            const laid = placed.map((marker) => {
+              const role =
+                roleById.get(marker.id) ?? (marker.member === "child" ? "child" : "mom");
+              const fill = ROLE_COLOR[role];
+              const rawTop = marker.side === "buy" ? marker.y - GAP - BADGE : marker.y + GAP;
+              const badgeY = clampBadgeTop(rawTop, pane.height, marker.side);
+              const overflowsTailBuffer =
+                marker.side === "buy" ? rawTop > pane.height - BADGE - TAIL : rawTop < TAIL;
+              const tailPointsDown = marker.side === "buy" ? !overflowsTailBuffer : overflowsTailBuffer;
+              const base = tailPointsDown ? badgeY + BADGE : badgeY;
+              const tip = tailPointsDown ? base + TAIL : base - TAIL;
+              return { marker, fill, badgeY, base, tip };
+            });
+            // 뱃지를 전부 먼저 그리고 꼬리는 따로 마지막에 그린다. 연속된 봉마다 체결이
+            // 있으면 뱃지 폭(22px)이 봉 간격보다 넓어 옆 마커의 뱃지가 겹친다. 마커 하나의
+            // <g> 안에서 꼬리→뱃지 순으로 그리면, 옆 마커(뒤에 그려짐)의 뱃지가 이 마커의
+            // 꼬리를 통째로 덮어 뾰족한 부분이 사라진다. 꼬리를 모든 뱃지 위에 올리면
+            // 뱃지끼리는 여전히 겹치더라도 꼬리는 항상 보인다.
+            return (
+              <>
+                {/*
+                  안내선을 가장 먼저 깔아 뱃지·꼬리가 그 위에 온다. 체결가(`marker.y`)에서
+                  시간축까지 곧게 내려 어느 봉의 체결인지 못 박는다. 체결가가 지금 보이는
+                  봉의 가격 범위를 벗어나 뱃지가 끝에 눌러앉은 경우에도, 선은 뱃지가 아니라
+                  **체결가**에서 시작해야 거짓말을 하지 않으므로 페인 안으로만 자른다.
+                */}
+                {laid.map(({ marker, fill }) => (
+                  <line
+                    key={`${marker.id}-guide`}
+                    opacity={GUIDE_OPACITY}
+                    stroke={fill}
+                    strokeDasharray={GUIDE_DASH}
+                    strokeWidth={1}
+                    x1={marker.x}
+                    x2={marker.x}
+                    y1={Math.min(Math.max(marker.y, 0), pane.height)}
+                    y2={pane.height}
+                  />
+                ))}
+                {laid.map(({ marker, fill, badgeY }) => (
+                  <g key={marker.id}>
+                    <title>{marker.label}</title>
+                    <rect
+                      x={marker.x - BADGE / 2}
+                      y={badgeY}
+                      width={BADGE}
+                      height={BADGE}
+                      rx={6}
+                      fill={fill}
+                    />
+                    <text
+                      x={marker.x}
+                      y={badgeY + BADGE / 2}
+                      fontSize={12}
+                      fontWeight={800}
+                      fill="var(--color-trade-ink)"
+                      textAnchor="middle"
+                      dominantBaseline="central"
+                    >
+                      {marker.side === "buy" ? "B" : "S"}
+                    </text>
+                  </g>
+                ))}
+                {laid.map(({ marker, fill, base, tip }) => (
+                  <polygon
+                    key={`${marker.id}-tail`}
+                    points={`${marker.x - 5},${base} ${marker.x + 5},${base} ${marker.x},${tip}`}
+                    fill={fill}
+                  />
+                ))}
+              </>
+            );
+          })()}
+        </svg>
+      )}
+      {state !== "ready" && (
+        <div className="absolute inset-0 flex items-center justify-center bg-white text-sm text-ink opacity-60" role="status">
+          {state === "error" ? "차트 데이터를 불러오지 못했어요." : "차트를 불러오는 중이에요…"}
+        </div>
+      )}
+      <a className="absolute bottom-0 left-1 text-[9px] text-ink opacity-50" href="https://www.tradingview.com/" target="_blank" rel="noreferrer">
+        Charts by TradingView
+      </a>
+    </main>
+  );
+}

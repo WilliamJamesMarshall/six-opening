@@ -1,0 +1,466 @@
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+import type { ChatContext } from "../../shared/types/chatbot";
+import { accountTotalAsset, SEED } from "../../shared/store/prototype-account.js";
+import { ChartScreen } from "./ChartScreen";
+import type { CandleTipDismissals } from "./lib/candle-tip";
+import type { PrototypeChartPeriod } from "../f2-trade/chart-data";
+import { buildDetailChart, type DetailTrade } from "./lib/detail-chart";
+import { lastExplorePath } from "./lib/explore-memo";
+import { NewsScreen } from "./NewsScreen";
+import { PhoneFrame } from "./PhoneFrame";
+import { styleFromCss } from "./lib/css-style";
+import {
+  StockFooter,
+  SUB_PAGE,
+  SubScreenHeader,
+  WatchButton,
+} from "./lib/stock-chrome";
+import { validNewsItem, type NewsItem } from "./lib/stock-news";
+import { recordTabView } from "./lib/tab-views";
+import type { TutorialStage } from "./lib/tutorial-steps";
+import { useStockLive } from "./lib/use-universe";
+import { canTrade, useWallet, type WalletAccountId } from "./lib/use-wallet";
+import { useWatchlist } from "./lib/use-watchlist";
+
+const UP = "#E8322E";
+const DOWN = "#1668DC";
+
+const SCROLL = styleFromCss(
+  "flex:1;overflow-y:auto;overflow-x:hidden;padding:2px 16px 0;display:flex;flex-direction:column;gap:11px",
+);
+const PRICE_CARD = styleFromCss(
+  "background:#FFFFFF;border-radius:30px;padding:18px 20px;box-shadow:0 2px 10px rgba(30,25,60,0.05)",
+);
+const CHART_WRAP = styleFromCss("position:relative;margin-top:14px");
+// `line-height` 를 못 박아 둔다 — `detail-chart` 의 겹침 판정이 이 높이(LABEL_H)를 그대로 쓴다.
+const HI_LO_LABEL = styleFromCss(
+  "position:absolute;transform:translate(-50%,0);font-size:11.5px;line-height:14px;font-weight:600;" +
+    "white-space:nowrap;pointer-events:none",
+);
+const PIN = styleFromCss(
+  "position:absolute;transform:translate(-50%,-100%);display:flex;flex-direction:column;align-items:center;" +
+    "pointer-events:none;filter:drop-shadow(0 2px 4px rgba(30,25,60,0.16))",
+);
+// 원본은 파스텔 바탕에 짙은 남회색 글씨다 — 흰 글씨는 이 색 위에서 읽히지 않는다.
+const PIN_BODY = styleFromCss(
+  "display:flex;align-items:center;justify-content:center;width:23px;height:23px;border-radius:8px;" +
+    "font-size:12px;font-weight:800;color:#3A3F5C;box-shadow:inset 0 0 0 1px rgba(255,255,255,0.7)",
+);
+const PIN_TAIL = styleFromCss(
+  "width:0;height:0;margin-top:-1px;border-left:5px solid transparent;border-right:5px solid transparent",
+);
+const CARD = styleFromCss(
+  "background:#FFFFFF;border-radius:26px;padding:16px 18px;box-shadow:0 2px 10px rgba(30,25,60,0.05)",
+);
+const CARD_TITLE = styleFromCss(
+  "font-size:17.5px;font-weight:800;color:#01185A;white-space:nowrap",
+);
+const CARD_BODY = styleFromCss(
+  "font-size:16px;font-weight:500;color:#5C6280;line-height:1.75;margin-top:10px;text-wrap:pretty",
+);
+// 원본은 이 줄에 캡션 없이 버튼만 오른쪽에 둔다.
+const CARD_FOOT = styleFromCss("display:flex;align-items:center;justify-content:flex-end;margin-top:14px");
+const MORE_BTN = styleFromCss(
+  "font-size:13px;font-weight:700;color:#01185A;padding:9px 14px;border-radius:999px;cursor:pointer;white-space:nowrap;background:#F1F2F8",
+);
+// 가격 카드 머리 — 원본 그대로. 종목명이 왼쪽, 업종 배지가 오른쪽 끝, 그 아래 큰 가격,
+// 그 아래 변동액과 등락률 한 줄이다.
+const NAME_ROW = styleFromCss("display:flex;align-items:flex-start;justify-content:space-between;gap:10px");
+const NAME_TEXT = styleFromCss(
+  "flex:1;min-width:0;font-size:17px;font-weight:700;color:#141B3D;letter-spacing:-0.02em;" +
+    "white-space:nowrap;overflow:hidden;text-overflow:ellipsis",
+);
+const PRICE_TEXT = styleFromCss(
+  "font-size:36px;font-weight:800;color:#0D1330;font-variant-numeric:tabular-nums;line-height:1.1;" +
+    "margin-top:7px;white-space:nowrap;letter-spacing:-0.035em",
+);
+const CHANGE_ROW = styleFromCss("display:flex;align-items:baseline;gap:8px;margin-top:7px");
+/** 업종 배지 — 업종마다 글자색과 옅은 배경 한 쌍. 원본 `detailCatStyle` 의 표와 같다. */
+const SECTOR_BADGE: Record<string, [string, string]> = {
+  semi: ["#2F6BE0", "#E6EEFD"],
+  game: ["#6D3FD4", "#F0EAFE"],
+  food: ["#C4571F", "#FDEDE2"],
+  auto: ["#1F7A5F", "#E3F4EE"],
+  enter: ["#C42A6D", "#FCE7F0"],
+  beauty: ["#A93E9B", "#F7E9F6"],
+  air: ["#1E8FCC", "#E4F3FC"],
+  ship: ["#106E7E", "#DEF0F2"],
+  defense: ["#4E5C78", "#EBEEF4"],
+  energy: ["#A07207", "#FBF1DC"],
+  retail: ["#7A5230", "#F2EBE2"],
+  logi: ["#5C6B3D", "#EFF2E6"],
+  bank: ["#2A3B6E", "#E8EAF2"],
+};
+const badgeFor = (sector: string) => {
+  const [ink, bg] = SECTOR_BADGE[sector] ?? ["#4E5C78", "#EBEEF4"];
+  return styleFromCss(
+    "flex:none;display:inline-flex;align-items:center;height:28px;padding:0 13px;border-radius:999px;" +
+      `font-size:12.5px;font-weight:700;white-space:nowrap;color:${ink};background:${bg}`,
+  );
+};
+
+/** `app.html` 의 `topic()` — 이름 끝 받침에 맞는 조사(은/는). */
+function josa(name: string) {
+  const ch = name.charCodeAt(name.length - 1);
+  if (ch >= 0xac00 && ch <= 0xd7a3) return (ch - 0xac00) % 28 !== 0 ? "은" : "는";
+  return "는";
+}
+
+type NewsStatus = "loading" | "ready" | "empty" | "error";
+
+/**
+ * 종목 상세 화면. `ui-src/screens/detail.html` 을 그대로 옮겨 왔고,
+ * 차트·뉴스는 상세에서만 열리는 하위 화면이라 여기서 함께 소유한다 — 주소는 셋 다
+ * `/stock/{code}` 하나다(`screen-route` 의 기존 결정 그대로).
+ *
+ * 기록은 두 가지다.
+ * - 챗봇 맥락: 지금 보는 종목·내 지갑 값을 부모(`ConnectedPrototype`)에 올린다.
+ * - 상세 탭 유효 열람(10초): `lib/tab-views` 버퍼에 쌓는다. 매수 체결 때
+ *   `OrderScreen` 이 서버로 보낸다 — 매수도 React 로 옮겨 와 버퍼와 방아쇠가 한 집에 산다.
+ *
+ * 차트·뉴스 열람을 지갑 `events` 에 남기던 세 번째 기록은 걷어냈다. 아무도 읽지 않았고,
+ * 열람 수를 세는 것은 `/api/tab-view` 하나다.
+ */
+export function DetailScreen({
+  code,
+  account,
+  onLeave,
+  onChatContext,
+  onStage,
+  closedCandleTips,
+  onCloseCandleTip,
+}: {
+  code: string;
+  account: WalletAccountId;
+  onLeave: (path: string) => void;
+  onChatContext: (context: ChatContext | null) => void;
+  /**
+   * 캔들 안내의 닫힘 표시. 상세는 갖지 않고 지나 보내기만 한다 — 종목을 떠나면 이 화면이
+   * 통째로 사라지므로 여기에 두면 닫아 놓은 안내가 되살아난다(`ConnectedPrototype` 이 갖는다).
+   */
+  closedCandleTips: CandleTipDismissals;
+  onCloseCandleTip: (period: PrototypeChartPeriod) => void;
+  /**
+   * 상세·차트·뉴스는 주소가 안 바뀌어(`useState`) 밖에서는 어디에 있는지 안 보인다.
+   * 튜토리얼은 그 자리를 알아야 맞는 설명을 띄우므로 `onLeave` 와 같은 패턴으로 올린다.
+   */
+  onStage?: (stage: TutorialStage) => void;
+}) {
+  const { wallet } = useWallet();
+  const { codes: watchCodes, toggle: watchToggle } = useWatchlist();
+  const live = useStockLive(code);
+  const [view, setView] = useState<"detail" | "chart" | "news">("detail");
+  useEffect(() => {
+    onStage?.(view);
+  }, [view, onStage]);
+  const [newsStatus, setNewsStatus] = useState<NewsStatus>("loading");
+  const [newsItem, setNewsItem] = useState<NewsItem | null>(null);
+  const [activeNews, setActiveNews] = useState<NewsItem | null>(null);
+  const [trades, setTrades] = useState<DetailTrade[]>([]);
+
+  // 최근 매매 지점(B/S 핀)의 출처. `TradingViewChart` 의 가족 체결 마커와 같은 API다
+  // (F11 SPEC §6.1) — 없는 체결을 지어내지 않는다.
+  useEffect(() => {
+    let cancelled = false;
+    setTrades([]);
+    fetch(`/api/trades?symbol=${encodeURIComponent(code)}`, { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: { trades?: DetailTrade[] } | null) => {
+        if (!cancelled && data) setTrades(data.trades ?? []);
+      })
+      .catch(() => {
+        if (!cancelled) setTrades([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [code]);
+
+  // 종목 뉴스 요약 — `app.html` 이 상세 진입 때 부르던 `loadNews` 와 같은 경로·판정.
+  const loadNews = (symbol: string) => {
+    setNewsStatus("loading");
+    fetch(`/api/news?stockId=${encodeURIComponent(`KRX:${symbol}`)}`, { cache: "no-store" })
+      .then((r) => {
+        if (!r.ok) throw new Error("news lookup failed");
+        return r.json();
+      })
+      .then((data: { item?: unknown } | null) => {
+        const item = data?.item ?? null;
+        if (item !== null && !validNewsItem(item, symbol)) throw new Error("invalid news contract");
+        setNewsItem(item as NewsItem | null);
+        setNewsStatus(item ? "ready" : "empty");
+      })
+      .catch(() => setNewsStatus("error"));
+  };
+  useEffect(() => {
+    setNewsItem(null);
+    setActiveNews(null);
+    setView("detail");
+    loadNews(code);
+  }, [code]);
+
+  // 유니버스에 없는 코드는 탐색으로 보낸다 — `app.html` 도 모르는 종목은 열지 않았다.
+  useEffect(() => {
+    if (live.loaded && !live.stock) onLeave("/explore");
+  }, [live.loaded, live.stock, onLeave]);
+
+  // 상세 탭 유효 열람. 화면(상세·차트·뉴스)마다 한 방문이고 10초 이상만 쌓는다.
+  // 판정은 서버(`/api/tab-view`)가 다시 한다.
+  useEffect(() => {
+    const openedAt = new Date();
+    return () => {
+      const closedAt = new Date();
+      if (closedAt.getTime() - openedAt.getTime() >= 10_000) {
+        recordTabView(code, openedAt.toISOString(), closedAt.toISOString());
+      }
+    };
+  }, [view, code]);
+
+  // 챗봇 맥락. `app.html` 의 `notifyChatContext` 가 싣던 값과 같은 모양이다.
+  const stockName = live.stock?.name ?? "";
+  const walletRef = useRef(wallet);
+  walletRef.current = wallet;
+  useEffect(() => {
+    const me = walletRef.current?.acc[account];
+    if (!stockName || !me) return;
+    const context: ChatContext = {
+      screen: "stock",
+      stockId: `KRX:${code}`,
+      stockName,
+    };
+    const total = accountTotalAsset(me, (symbol: string) => live.prices[symbol] ?? 0);
+    if (Number.isFinite(total)) {
+      context.pnlPercent = Math.round(((total - SEED) / SEED) * 10000) / 100;
+    }
+    if (Number.isFinite(me.cash) && me.cash >= 0) context.cash = Math.round(me.cash);
+    context.holdingCount = me.holdings.filter((holding) => Number(holding.qty) > 0).length;
+    onChatContext(context);
+    // live.price 로 갱신 주기를 좁힌다 — 시세가 실제로 움직일 때만 맥락을 다시 올린다.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [code, stockName, account, wallet, live.price, onChatContext]);
+  useEffect(() => () => onChatContext(null), [onChatContext]);
+
+  if (!wallet || !live.stock) return <PhoneFrame />;
+
+  const stock = live.stock;
+  const locked = !canTrade(account);
+  const changeUp = live.change >= 0;
+  const priceText = `${live.price.toLocaleString("ko-KR")}원`;
+  // 원본은 **얼마 올랐는지(원)가 먼저**, 몇 %인지는 세로선 뒤에 작게 붙는다.
+  // 변동액은 등락률에서 되짚는다 — `price * change / (100 + change)`.
+  const changeWon = Math.abs(Math.round((live.price * live.change) / (100 + live.change)));
+  const changeText = `${changeUp ? "▲ " : "▼ "}${changeWon.toLocaleString("ko-KR")}원`;
+  const diffText = `${live.change >= 0 ? "+" : ""}${live.change.toFixed(2)}%`;
+  const changeStyle = styleFromCss(
+    "font-size:18px;font-weight:800;font-variant-numeric:tabular-nums;white-space:nowrap;color:" +
+      (changeUp ? UP : DOWN),
+  );
+  const diffStyle = styleFromCss(
+    "font-size:14px;font-weight:600;font-variant-numeric:tabular-nums;white-space:nowrap;" +
+      `padding-left:9px;border-left:1px solid ${changeUp ? UP : DOWN}59;color:${changeUp ? UP : DOWN}`,
+  );
+  const watched = watchCodes.includes(code);
+  const startBuy = () => {
+    if (!locked) onLeave(`/buy/${code}`);
+  };
+  // 서버가 원본이다 — 응답이 와야 하트가 바뀐다. 탐색의 관심 기업 필터가 같은 목록을 읽는다.
+  const toggleWatch = () => {
+    void watchToggle(code);
+  };
+
+  const openChart = () => setView("chart");
+  const openNews = () => {
+    if (newsItem) {
+      setActiveNews(newsItem);
+      setView("news");
+    } else if (newsStatus === "error") {
+      loadNews(code);
+    }
+  };
+
+  const newsSummary =
+    newsItem?.headline ??
+    (newsStatus === "error"
+      ? "뉴스를 불러오지 못했어요. 다시 눌러 주세요."
+      : newsStatus === "empty"
+        ? "아직 검수를 통과한 새 소식이 없어요."
+        : "검수를 통과한 새 소식을 찾고 있어요.");
+  const newsMoreLabel = newsItem
+    ? "뉴스 자세히 보기"
+    : newsStatus === "error"
+      ? "다시 불러오기"
+      : newsStatus === "empty"
+        ? "새 소식 없음"
+        : "불러오는 중";
+  const newsMoreActive = Boolean(newsItem) || newsStatus === "error";
+  const newsMoreStyle = styleFromCss(
+    "font-size:13px;font-weight:700;color:#01185A;padding:9px 14px;border-radius:999px;white-space:nowrap;" +
+      "background:radial-gradient(ellipse 64% 56% at 50% -6%,rgba(255,255,255,1) 0%,rgba(255,255,255,0.5) 44%,rgba(255,255,255,0) 86%)," +
+      "linear-gradient(180deg,#FCFCFE 0%,#F4F5FB 36%,#EBEDF7 70%,#E2E5F1 100%);" +
+      "box-shadow:0 7px 12px -5px rgba(35,25,80,0.2),inset 0 -8px 13px -7px rgba(255,255,255,0.9),inset 0 1.5px 2px rgba(255,255,255,1);" +
+      `cursor:${newsMoreActive ? "pointer" : "default"};opacity:${newsMoreActive ? "1" : "0.58"}`,
+  );
+  const badgeStyle = styleFromCss(
+    "width:52px;height:52px;flex:none;border-radius:18px;display:flex;align-items:center;justify-content:center;font-size:25px;background:#F4F4FA" +
+      (stock.logoUrl
+        ? `;background-image:url(${stock.logoUrl});background-position:center;background-size:contain;background-repeat:no-repeat`
+        : ""),
+  );
+  const chart = buildDetailChart({
+    spark: live.spark,
+    price: live.price,
+    changePercent: live.change,
+    trades,
+  });
+
+  const screen =
+    view === "chart" ? (
+      <ChartScreen
+        changeStyle={changeStyle}
+        changeText={changeText}
+        changeUp={changeUp}
+        closedCandleTips={closedCandleTips}
+        code={code}
+        diffStyle={diffStyle}
+        diffText={diffText}
+        locked={locked}
+        name={stock.name}
+        onBack={() => setView("detail")}
+        onCloseCandleTip={onCloseCandleTip}
+        onLeave={onLeave}
+        onStartBuy={startBuy}
+        // 하트는 상세와 같은 상태 하나를 본다. 차트가 `useWatchlist` 를 따로 부르면 두
+        // 하트가 각자 서버 응답을 기다려, 상세에서 담고 들어간 차트가 잠깐 비어 보인다.
+        onToggleWatch={toggleWatch}
+        price={live.price}
+        priceText={priceText}
+        sectorName={stock.sectorName}
+        sectorStyle={badgeFor(stock.sector)}
+        watched={watched}
+      />
+    ) : view === "news" && activeNews ? (
+      <NewsScreen
+        code={code}
+        item={activeNews}
+        locked={locked}
+        onBack={() => setView("detail")}
+        onLeave={onLeave}
+        onStartBuy={startBuy}
+        stockName={stock.name}
+      />
+    ) : (
+      <div style={SUB_PAGE}>
+        <SubScreenHeader
+          // 떠날 때 보던 목록으로 돌아간다 — 늘 `/explore` 로 보내면 고른 섹터가 풀린다.
+          onBack={() => onLeave(lastExplorePath())}
+          right={<WatchButton onToggle={toggleWatch} watched={watched} />}
+          // 원본 헤더 제목은 종목 이름이 아니라 화면 이름이다 — 이름은 아래 카드가 말한다.
+          title="종목 상세"
+        />
+        <div style={SCROLL}>
+          <div style={PRICE_CARD}>
+            <div style={NAME_ROW}>
+              <div style={NAME_TEXT}>{stock.name}</div>
+              <div style={badgeFor(stock.sector)}>{stock.sectorName}</div>
+            </div>
+            <div style={PRICE_TEXT}>{priceText}</div>
+            <div style={CHANGE_ROW}>
+              <span style={changeStyle}>{changeText}</span>
+              <span style={diffStyle}>{diffText}</span>
+            </div>
+            <div id="tut-detail-chart" style={CHART_WRAP}>
+              <svg
+                height={164}
+                preserveAspectRatio="none"
+                style={{ display: "block" }}
+                viewBox="0 0 336 164"
+                width={336}
+              >
+                {chart && (
+                  <>
+                    <polyline
+                      fill="none"
+                      points={chart.linePoints}
+                      stroke={changeUp ? UP : DOWN}
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2.4}
+                    />
+                    {chart.pins.map((pin) => (
+                      <line
+                        key={pin.id}
+                        stroke={pin.color}
+                        strokeDasharray="2 3"
+                        strokeOpacity={0.35}
+                        x1={pin.x}
+                        x2={pin.x}
+                        y1={pin.y}
+                        y2={164}
+                      />
+                    ))}
+                    {/*
+                      최고·최저에 점을 찍지 않는다. `hi.x`·`lo.x` 는 **이름표 자리**라
+                      카드 밖으로 잘리지 않게 안쪽으로 끌려 들어온 값인데, 여기에 안 끌린
+                      `hi.y` 를 짝지어 점을 찍으면 최고·최저가 좌우 끝에 있을 때만 점이
+                      옆으로 미끄러져 선에서 떨어진 허공에 뜬다. 이름표가 숨는 경우
+                      (최고가 곧 지금 가격일 때)에도 점은 남아 글자 없는 점만 떠 있었다.
+                      값은 이름표가 이미 말하므로 점 없이 선만 둔다 — 차트 화면
+                      (`ChartScreen`)은 점용 x 와 이름표용 x 가 갈려 있어 그대로 찍는다.
+                    */}
+                  </>
+                )}
+              </svg>
+              {chart?.hi.visible && (
+                <div style={{ ...HI_LO_LABEL, left: chart.hi.x, top: chart.hi.labelY, color: changeUp ? UP : DOWN }}>
+                  {chart.hi.text}
+                </div>
+              )}
+              {chart?.lo.visible && (
+                <div style={{ ...HI_LO_LABEL, left: chart.lo.x, top: chart.lo.labelY, color: changeUp ? UP : DOWN }}>
+                  {chart.lo.text}
+                </div>
+              )}
+              {chart?.pins.map((pin) => {
+                const color = pin.color;
+                return (
+                  <div key={pin.id} style={{ ...PIN, left: pin.x, top: pin.y - 7 }} title={pin.title}>
+                    <div style={{ ...PIN_BODY, background: color }}>{pin.label}</div>
+                    <div style={{ ...PIN_TAIL, borderTop: `7px solid ${color}` }} />
+                  </div>
+                );
+              })}
+            </div>
+            <div style={CARD_FOOT}>
+              <div onClick={openChart} style={MORE_BTN}>
+                차트 자세히 보기 ›
+              </div>
+            </div>
+          </div>
+
+          <div id="tut-detail-about" style={CARD}>
+            <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+              <span style={CARD_TITLE}>이 회사는 뭘 하나요?</span>
+            </div>
+            <div style={CARD_BODY}>{`${stock.name}${josa(stock.name)} ${stock.desc}.`}</div>
+          </div>
+
+          <div id="tut-detail-news" style={CARD}>
+            <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+              <span style={CARD_TITLE}>요즘 무슨 일이 있었나요?</span>
+            </div>
+            <div style={CARD_BODY}>{newsSummary}</div>
+            <div style={styleFromCss("display:flex;align-items:center;justify-content:flex-end;margin-top:13px")}>
+              <div onClick={openNews} style={newsMoreStyle}>
+                {newsMoreLabel} ›
+              </div>
+            </div>
+          </div>
+        </div>
+        <StockFooter locked={locked} onLeave={onLeave} onStartBuy={startBuy} />
+      </div>
+    );
+
+  return <PhoneFrame>{screen}</PhoneFrame>;
+}

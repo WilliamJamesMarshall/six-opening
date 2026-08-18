@@ -1,0 +1,78 @@
+{
+  "schema_version": 2,
+  "date_kst": "2026-08-12",
+  "mix": { "경제": 3, "섹터": 3, "기업": 4 },
+  "note": "Luna medium 용어 설명 개선 검증용 신규 기사 10건. 후보 선정 서브에이전트가 같은 사건 중복을 제거하고 서로 다른 언론사의 생활경제·산업·기업 기사로 분산했다.",
+  "selections": [
+    {
+      "candidate_id": "N0088",
+      "bucket": "경제",
+      "scope": "economy",
+      "publisher": "뉴스1",
+      "reason": "음식 가격으로 구매력과 환율을 설명할 수 있어 어린이에게 직관적이다"
+    },
+    {
+      "candidate_id": "N0110",
+      "bucket": "경제",
+      "scope": "economy",
+      "publisher": "뉴시스",
+      "reason": "고용률과 실업률이라는 핵심 경제지표와 구체적인 수치가 있다"
+    },
+    {
+      "candidate_id": "N0295",
+      "bucket": "경제",
+      "scope": "economy",
+      "publisher": "KBS",
+      "reason": "기후 변화와 운송 차질, 물류의 연결을 구체적인 사례로 설명할 수 있다"
+    },
+    {
+      "candidate_id": "N0500",
+      "bucket": "섹터",
+      "scope": "industry",
+      "publisher": "연합뉴스",
+      "reason": "해외 투자와 반도체 생산 기반, 국가 산업정책을 함께 배울 수 있다"
+    },
+    {
+      "candidate_id": "N0550",
+      "bucket": "섹터",
+      "scope": "industry",
+      "publisher": "경향신문",
+      "reason": "보조금 정책이 소비자 수요와 전기차 보급에 미치는 영향을 생활 가까이 설명할 수 있다"
+    },
+    {
+      "candidate_id": "N0323",
+      "bucket": "섹터",
+      "scope": "industry",
+      "publisher": "헤럴드경제",
+      "reason": "통신 인프라가 인공지능 공동연구와 산업 기반을 어떻게 돕는지 보여준다"
+    },
+    {
+      "candidate_id": "N0085",
+      "bucket": "기업",
+      "scope": "company",
+      "publisher": "MBN",
+      "reason": "합병과 경쟁당국 심사라는 기업결합 과정을 구체적으로 설명할 수 있다"
+    },
+    {
+      "candidate_id": "N0102",
+      "bucket": "기업",
+      "scope": "company",
+      "publisher": "매일경제",
+      "reason": "온라인 기업의 해외 진출과 현지 유통망 활용 구조가 분명하다"
+    },
+    {
+      "candidate_id": "N0181",
+      "bucket": "기업",
+      "scope": "company",
+      "publisher": "SBS Biz",
+      "reason": "영업이익과 기저효과를 쉽게 풀어내는지 검증하기 좋은 실적 기사다"
+    },
+    {
+      "candidate_id": "N0727",
+      "bucket": "기업",
+      "scope": "company",
+      "publisher": "머니투데이",
+      "reason": "어린이가 아는 제품에 인공지능과 제품 성능, 국내 출시를 연결할 수 있다"
+    }
+  ]
+}

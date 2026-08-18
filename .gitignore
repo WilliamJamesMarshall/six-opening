@@ -1,0 +1,49 @@
+# 비밀키 — 절대 커밋 금지
+.env
+.env.*
+web/.env
+web/.env.*
+# 단, 값이 비어 있는 템플릿은 팀 공유용이므로 추적한다
+!.env.example
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+next-env.d.ts
+web/.next/
+web/out/
+web/next-env.d.ts
+*.tsbuildinfo
+
+# Local development logs
+*.log
+
+# OS·에디터
+.DS_Store
+Thumbs.db
+
+# AI 하네스 — 개인 설정은 무시하고 공용 Git 세션 스킬만 추적
+.claude/*
+!.claude/settings.json
+!.claude/agents/
+!.claude/agents/**
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/git-session-manager/
+!.claude/skills/git-session-manager/**
+!.claude/skills/child-news-pipeline/
+!.claude/skills/child-news-pipeline/**
+
+.agents/*
+!.agents/skills/
+.agents/skills/*
+!.agents/skills/git-session-manager/
+!.agents/skills/git-session-manager/**
+
+# codex CLI. hooks.json은 .claude/settings.json의 짝이고 agents는 어린이 뉴스 역할 정의라
+# 팀이 함께 쓴다. config.toml 같은 개인 설정은 사람마다 달라 추적하지 않는다.
+.codex/*
+!.codex/hooks.json
+!.codex/agents/
+!.codex/agents/**

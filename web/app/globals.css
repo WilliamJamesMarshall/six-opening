@@ -1,0 +1,80 @@
+@import "tailwindcss";
+
+@theme {
+  --color-navy: #001E5A;
+  --color-magenta: #D70082;
+  --color-gray: #BEBEBE;
+  --color-bg: #F6F7FA;
+  --color-ink: #1A2233;
+  --color-up: #E8322E;
+  --color-down: #1668DC;
+  /* 차트 매매 지점 마커. 등락색(up·down)을 쓰면 마커를 상승·하락으로 오독한다.
+     값은 상세 화면 미니 차트 핀(`f0-home/lib/detail-chart.ts` 의 `PIN_COLORS`)과 같은
+     파스텔이다. 같은 체결이 상세에서는 연보라, 차트 화면에서는 진초록으로 보이면
+     같은 사람의 매매인지 알아볼 수 없다. 바탕이 옅으므로 글자는 흰색이 아니라 짙은 색을 쓴다.
+     엄마·아빠를 따로 둔다 — 부모를 한 색으로 묶으면 둘 중 누가 산 것인지 못 가른다
+     (F11 SPEC §5.1 의 `role`). */
+  --color-trade-child: #A8B8E8;
+  --color-trade-mom: #F2AECB;
+  --color-trade-dad: #A9D5C8;
+  --color-trade-ink: #3A3F5C;
+  --shadow-card: 0 8px 24px rgb(0 30 90 / 0.08);
+}
+
+* { box-sizing: border-box; }
+
+/* 입력창은 브랜드 마젠타 링으로 포커스를 알린다. 화면들이 인라인 스타일로 `outline:none` 을
+   걸어 두어 Tab 으로 옮겨 다니면 지금 어디에 있는지 아무 표시가 없었다. `:focus-visible` 이라
+   마우스 클릭에는 뜨지 않고 키보드로 이동할 때만 나온다. F10 챗봇은 Tailwind 클래스
+   (`ring-magenta focus:ring-2`)로 이미 같은 일을 하고 있고, 클래스가 요소 선택자를 이기므로
+   여기 규칙이 그쪽에 덧그려지지 않는다. */
+input:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--color-magenta);
+  outline-offset: 2px;
+}
+
+html { background: var(--color-bg); }
+
+body {
+  margin: 0;
+  min-width: 320px;
+  background: var(--color-bg);
+  color: var(--color-ink);
+  font-family: "Pretendard", "Segoe UI", "Malgun Gothic", sans-serif;
+}
+
+/* `button, input { font: inherit }` 를 여기에 두지 않는다. 이 파일의 규칙은 레이어 밖이라
+   Tailwind 의 `@layer utilities` 안에 있는 `text-sm`·`font-medium` 을 카스케이드에서 이겨,
+   버튼과 입력창이 글씨 클래스를 통째로 무시하고 부모의 16px·400 을 물려받았다. 같은 선언은
+   Tailwind preflight 가 `@layer base` 에서 이미 하고 있으므로 여기서 다시 쓸 이유가 없다. */
+
+/* 폰 화면 사각형으로 잘라내는 `clip-path` 는 `ConnectedPrototype` 이 실측값으로 채운다.
+   iframe 안 프레임 이미지와 스태킹 컨텍스트가 갈려 z-index 로는 순서를 정할 수 없다. */
+.prototype-chat-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  pointer-events: none;
+}
+
+.prototype-chat-overlay > main {
+  min-height: 0;
+  padding: 0;
+  background: transparent;
+}
+
+.prototype-chat-overlay > main > div:first-child {
+  display: none;
+}
+
+.prototype-chat-overlay > main > button,
+.prototype-chat-overlay > main > aside,
+.prototype-chat-overlay > main > section {
+  pointer-events: auto;
+}
+
+/* 플로팅 버튼 좌표는 `lib/floating-avatar.ts` 가 화면 사각형에서 계산해 인라인으로 준다.
+   여기에 좌표를 적어 두면 인라인에 밀려 죽은 규칙으로 남는다. */
+
+/* 가족 피드는 app.html 아카이브 수익률 탭이 소유한다. 오버레이 버튼은 제거됐다. */

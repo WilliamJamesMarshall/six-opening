@@ -1,0 +1,20 @@
+# web rules
+
+- 이 디렉터리의 `AGENTS.md`와 `CLAUDE.md`는 한 쌍이다. 둘 중 하나를 수정하면 같은 작업에서 짝 파일도 동일하게 수정하고 완료 전 비교한다.
+- 기능 작업은 가장 가까운 기능 가드가 가리키는 `SPEC.md`를 단일 명세로 사용한다. 관련 없는 전역 문서는 기본으로 읽지 않는다.
+- UI uses only the tokens and components in `../docs/디자인시스템.md`. Do not add arbitrary hex values or duplicate shared components.
+- Import from `shared/` only. Changes within it follow `shared/AGENTS.md`.
+- Use fixtures first. LLM access is server-only through `shared/llm` using the `openai` Responses API; external data passes only through `app/api/quote`, never direct client calls or `NEXT_PUBLIC_*` keys.
+- Filter all LLM output. Numeric and scoring calculations use only `shared/engine`.
+- **사용자 화면은 전부 `web/features/f0-home`의 React 컴포넌트다.** iframe(`public/ui/app.html`)과 조립기(`ui-src`·`scripts/ui-build.mjs`)는 철거했다. `public/ui/assets`의 이미지·폰트는 React 화면이 계속 쓰므로 남는다.
+- Completion requires `npm run build`, the applicable golden-path check, and zero design-system violations.
+
+<!-- BEGIN:nextjs-agent-rules -->
+
+# This is NOT the Next.js you know
+
+This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
+
+This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
+
+<!-- END:nextjs-agent-rules -->

@@ -1,0 +1,152 @@
+import type { ChatOrderStep, ChatUiAction } from "../../shared/types/chatbot";
+
+/**
+ * 화면 ↔ 주소 매핑.
+ *
+ * 화면 전환은 한때 `app.html` 안의 `screen` 상태가 소유했고 주소는 항상 `/` 였다. 화면을
+ * 실제 라우트로 옮기면서 주소가 화면을 가리키게 됐고, iframe 을 걷어낸 지금은 이 파일의
+ * 두 함수가 주소의 전부다 — `routeFromPath` 가 아는 주소만 앱이고 나머지는 404 다.
+ */
+
+const STOCK_CODE = /^\d{6}$/u;
+
+/** 아카이브 안의 자리. `report` 는 기본이라 주소에 적지 않는다. */
+const ARCHIVE_VIEWS = ["return", "cards", "family", "last"];
+
+/** 주소로 표현하는 화면. `app.html` 의 `screen` 상태보다 거칠다(위 제약 참고). */
+export type ScreenRoute =
+  | { screen: "home" }
+  /** `sector` 는 탐색의 필터 칩 — `rank`(기본)·`watch`·유니버스 섹터 id. 챗봇의 섹터 점프가 쓴다. */
+  | { screen: "explore"; sector?: string }
+  | { screen: "ranking" }
+  /**
+   * `view` 는 아카이브 안에서 어디를 보고 있는지 — `report`(기본)·`return`·`cards`·`family`·`last`.
+   * 챗봇이 "내 성향 카드 보여줘" 로 바로 뛰어드는 자리라 주소로 표현한다.
+   */
+  | { screen: "archive"; view?: string }
+  | { screen: "stock"; code: string }
+  | { screen: "order"; code: string; side: "buy" | "sell" };
+
+/** 주소에서 첫 칸으로 쓰는 이름. 여기 없는 경로는 앱이 아니다(404). */
+export const SCREEN_SEGMENTS = [
+  "explore",
+  "ranking",
+  "archive",
+  "stock",
+  "buy",
+  "sell",
+] as const;
+
+/** `/archive` → `{ screen: "archive" }`. 모르는 경로는 `null` 이라 호출한 쪽이 404 를 낸다. */
+export function routeFromPath(pathname: string): ScreenRoute | null {
+  const parts = pathname.split("/").filter(Boolean).map(decodeURIComponent);
+  if (parts.length === 0) return { screen: "home" };
+
+  const [head, second] = parts;
+  if (parts.length === 1) {
+    if (head === "explore") return { screen: "explore" };
+    if (head === "ranking") return { screen: "ranking" };
+    if (head === "archive") return { screen: "archive" };
+    return null;
+  }
+  if (parts.length === 2 && STOCK_CODE.test(second)) {
+    if (head === "stock") return { screen: "stock", code: second };
+    if (head === "buy") return { screen: "order", code: second, side: "buy" };
+    if (head === "sell") return { screen: "order", code: second, side: "sell" };
+  }
+  // 섹터 id 는 소문자 영문이다. 모르는 값은 화면이 기본(오늘 많이 오른 순)으로 되돌린다.
+  if (parts.length === 2 && head === "explore" && /^[a-z]+$/u.test(second)) {
+    return { screen: "explore", sector: second };
+  }
+  if (parts.length === 2 && head === "archive" && ARCHIVE_VIEWS.includes(second)) {
+    return { screen: "archive", view: second };
+  }
+  return null;
+}
+
+/** `{ screen: "archive" }` → `/archive`. */
+export function pathFromRoute(route: ScreenRoute): string {
+  switch (route.screen) {
+    case "home":
+      return "/";
+    case "explore":
+      return route.sector ? `/explore/${route.sector}` : "/explore";
+    case "archive":
+      return route.view ? `/archive/${route.view}` : "/archive";
+    case "stock":
+      return `/stock/${route.code}`;
+    case "order":
+      return `/${route.side}/${route.code}`;
+    default:
+      return `/${route.screen}`;
+  }
+}
+
+function currentStockCode(route: ScreenRoute | null): string | null {
+  return route?.screen === "stock" || route?.screen === "order" ? route.code : null;
+}
+
+function actionStockCode(action: ChatUiAction, current: ScreenRoute | null): string | null {
+  const match = /^KRX:(\d{6})$/u.exec(action.stockId ?? "");
+  return match?.[1] ?? currentStockCode(current);
+}
+
+export type ChatOrderRequest = {
+  id: number;
+  step?: ChatOrderStep;
+};
+
+/**
+ * 주문 단계는 주소가 아니라 화면 안 상태다. 필요한 앞 단계 값이 있을 때만 2단계로
+ * 보내고, 새 주문이나 불완전한 초안은 1단계에서 시작한다.
+ */
+export function orderStageFromChatStep(
+  step: ChatOrderStep | undefined,
+  quantityReady: boolean,
+  confirmationReady: boolean,
+): 1 | 2 {
+  if (step === "reason" && quantityReady) return 2;
+  if (step === "confirmation" && confirmationReady) return 2;
+  return 1;
+}
+
+/** 서버가 허용한 챗봇 버튼을 현재 React 화면 주소로 바꾼다. 모델 URL은 받지 않는다. */
+export function routeFromChatAction(
+  action: ChatUiAction,
+  current: ScreenRoute | null,
+): ScreenRoute {
+  switch (action.target) {
+    case "home":
+      return { screen: "home" };
+    case "ranking":
+      return { screen: "ranking" };
+    // `내 계좌` 화면은 걷어냈다. 서버 계약(`CHAT_ACTION_TARGETS`)에는 아직 `portfolio` 가
+    // 남아 있으므로 **여기서 홈으로 받는다** — 총자산·쓸 수 있는 돈·가진 회사는 홈이
+    // 보여 준다. 지난 답변이 이 타깃을 들고 와도 없는 화면으로 보내지 않기 위해서다.
+    case "portfolio":
+      return { screen: "home" };
+    case "archive":
+      return action.archiveOverlay === "cards"
+        ? { screen: "archive", view: "cards" }
+        : action.archiveTab === "return"
+          ? { screen: "archive", view: "return" }
+          : { screen: "archive" };
+    case "stock": {
+      // 섹터·탐색 지시는 특정 종목보다 먼저다. `rank` 는 탐색의 기본 필터라 주소를 생략한다.
+      if (action.stockView === "explore" || action.sectorId) {
+        const sector = action.sectorId;
+        return sector && sector !== "rank" && /^[a-z]+$/u.test(sector)
+          ? { screen: "explore", sector }
+          : { screen: "explore" };
+      }
+      const code = actionStockCode(action, current);
+      return code ? { screen: "stock", code } : { screen: "explore" };
+    }
+    case "order": {
+      const code = actionStockCode(action, current);
+      if (!code) return { screen: "explore" };
+      const side = action.orderSide ?? (current?.screen === "order" ? current.side : "buy");
+      return { screen: "order", code, side };
+    }
+  }
+}
